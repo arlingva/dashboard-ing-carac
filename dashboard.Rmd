@@ -6,10 +6,12 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+rm(list=ls())
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
+library(twitteR)
 library(tidyverse)
 library(tidytext)
 library(tm)
@@ -20,6 +22,11 @@ library(magrittr)
 library(xts)
 library(dygraphs)
 ```
+
+```{r}
+source("funcionesDashboard.R")
+```
+
 
 ```{r}
 tema_graf <-
@@ -37,7 +44,7 @@ La versión que usaremos es una traducción automática, de inglés a español, 
 
 Descargamos este léxico de la siguiente dirección:
 
-```{r}
+```{r, eval = F}
 download.file("https://raw.githubusercontent.com/jboscomendoza/rpubs/master/sentimientos_afinn/lexico_afinn.en.es.csv", "lexico_afinn.en.es.csv")
 ```
 
@@ -61,19 +68,21 @@ setup_twitter_oauth(CK, CS, AT, AS)
 ```
 
 ```{r}
-n <- 50
+num.tweets <- 1000
 
 usuarios <-c("ClaudiaPavlovic", "lopezobrador_")
 
 df.tweet <- c()
 
 for (i in 1:length(usuarios)){
-  temp <- userTimeline(usuarios[i], n, maxID=NULL, sinceID=NULL, 
+  temp <- userTimeline(usuarios[i], n = num.tweets, maxID=NULL, sinceID=NULL, 
                          includeRts=FALSE, excludeReplies=FALSE) %>% 
   twListToDF()
   df.tweet <- rbind(df.tweet, temp)
 }
 rm(temp)
+
+write.csv(df.tweet, "df.tweet.csv")
 ```
 
 Peparando los datos
@@ -82,7 +91,10 @@ Lo primero que necesitamos es filtrar el objeto tuits para limitar nuestros dato
 
 Por último, usamos filter() de dplyr para seleccionar sólo los tuits hechos en el 2018.
 
+## INICIO
+
 ```{r}
+df.tweet <- read.csv("df.tweet.csv")
 df.tweet <- df.tweet %>%
   separate(created, into = c("Fecha", "Hora"), sep = " ")
 df.tweet$Fecha %<>% ymd()
@@ -131,6 +143,10 @@ df.afinn %>%
   distinct(Palabra) %>% 
   count()
 
+df.afinn <-
+  df.afinn %>%
+  filter(Palabra != "no") 
+
 map(c("Positiva", "Negativa"), function(sentimiento) {
   df.afinn %>%
     filter(Tipo ==  sentimiento) %>%
@@ -148,35 +164,84 @@ map(c("Positiva", "Negativa"), function(sentimiento) {
 })
 ```
 ```{r}
-df.afinn <-
-  df.afinn %>%
-  filter(Palabra != "no") 
-
 df.afinn.date <- df.afinn %>%
-                        group_by(id) %>%
+                        group_by(Candidato, Fecha) %>%
                         mutate(Suma = mean(Puntuacion)) %>%
+                        summarise(Media = mean(Puntuacion)) %>%
+  dcast(Fecha ~ Candidato) %>%
+  rename(CPA = ClaudiaPavlovic, AMLO = lopezobrador_)
+
+df.afinn.date <- xts(df.afinn.date[2:3], order.by = df.afinn.date$Fecha)
+df.afinn.date %>% head()
+df.afinn.date$CPA <- as.numeric(df.afinn.date$CPA)
+df.afinn.date$AMLO <- as.numeric(df.afinn.date$AMLO)
+```
+
+```{r}
+df.afinn.date <- df.afinn %>%
                         group_by(Candidato, Fecha) %>%
-                        summarise(Media = mean(Puntuacion))
+                        mutate(Suma = mean(Puntuacion)) %>%
+                        summarise(Media = mean(Puntuacion)) %>%
+  dcast(Fecha ~ Candidato) %>%
+  rename(CPA = ClaudiaPavlovic, AMLO = lopezobrador_)
 
-xts.afinn.date <- df.afinn %>%
-                        group_by(id) %>%
-                        group_by(Candidato, Fecha) %>%
-                        mutate(AMLO = ifelse(Candidato == "lopezobrador_"), mean(Puntuacion), NA) %>%
-                        group_by(Candidato, Fecha) %>%
-                        summarise(Media = mean(Puntuacion))
+xtsAMLO <- xts(df.afinn.date$AMLO, order.by = df.afinn.date$Fecha)
+xtsCPA <- xts(df.afinn.date$CPA, order.by = df.afinn.date$Fecha)
+```
 
+```{r}
+punt.Candidatos<- cbind(xtsAMLO, xtsCPA)
 
-df.afinn.date <- xts(df.afinn.date, order.by = df.afinn.date$Fecha)
-
-dygraph(df.afinn.date) %>%
-  dyOptions(fillGraph=TRUE, colors = "darkolivegreen", pointShape = "ex") %>%
+punt.Candidatos %>% dygraph %>%
+  dyLegend(show = "always", hideOnMouseOut = TRUE) %>%
+  dyOptions(pointShape = "ex") %>%
   dyRangeSelector()
 
-df.afinn.fecha %>%
-  ggplot() +
-  aes(Fecha, Media, color = Candidato) +
-  geom_line() +
-  theme(legend.position = "top")
+SMA = SMA(xtsAMLO, n = 8)
+dygraph(
+  cbind(confirmados = punt.Candidatos, 
+        SMA)) %>%
+  dyOptions(colors = c("black", "red"), pointShape = "ex") %>%
+  dyRangeSelector()
+```
+
+
+
+```{r}
+df.afinn.date <- df.afinn %>%
+                        group_by(Candidato, Fecha) %>%
+                        mutate(Suma = mean(Puntuacion)) %>%
+                        summarise(Media = mean(Puntuacion))
+xtsCPA <- df.afinn.date %>%
+  filter(Candidato == "ClaudiaPavlovic")
+
+xtsCPA <- xtsCPA[,2:3]
+
+xtsCPA <- xts(xtsCPA$Media, order.by = xtsCPA$Fecha)
+
+dygraph(xtsCPA) %>%
+  dyOptions(fillGraph=TRUE, colors = c("darkred"), pointShape = "ex") %>%
+  dyRangeSelector()
+```
+
+
+```{r}
+dygraph(df.afinn.date) %>%
+  dyOptions(fillGraph=TRUE, colors = c("darkred", "mediumseagreen"), pointShape = "ex") %>%
+  dyRangeSelector()
+```
+```{r}
+library(TTR)
+SMA = SMA(df.afinn.date, n = 8)
+dygraph(
+  cbind(confirmados = xtsNuevosConfirmados, 
+        SMA)) %>%
+  dyOptions(colors = c("black", "red"), pointShape = "ex") %>%
+  dyRangeSelector()
 
 ```
 
+
+https://rpubs.com/Joaquin_AR/334526
+
+https://rpubs.com/jboscomendoza/analisis_sentimientos_lexico_afinn
