@@ -1,0 +1,182 @@
+---
+title: "Dashboad"
+author: "arlingva"
+date: "12/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(lubridate)
+library(zoo)
+library(scales)
+library(magrittr)
+library(xts)
+library(dygraphs)
+```
+
+```{r}
+tema_graf <-
+  theme_minimal() +
+  theme(text = element_text(family = "serif"),
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "#EBEBEB", colour = NA),
+        legend.position = "none",
+        legend.box.background = element_rect(fill = "#EBEBEB", colour = NA))
+```
+
+Para este análisis de sentimiento usaremos el léxico Afinn. Este es un conjunto de palabras, puntuadas de acuerdo a qué tan positivamente o negativamente son percibidas. Las palabras que son percibidas de manera positiva tienen puntuaciones de -4 a -1; y las positivas de 1 a 4.
+
+La versión que usaremos es una traducción automática, de inglés a español, de la versión del léxico presente en el conjunto de datos sentiments de tidytext, con algunas correcciones manuales. Por supuesto, esto quiere decir que este léxico tendrá algunos defectos, pero será suficiente para nuestro análisis.
+
+Descargamos este léxico de la siguiente dirección:
+
+```{r}
+download.file("https://raw.githubusercontent.com/jboscomendoza/rpubs/master/sentimientos_afinn/lexico_afinn.en.es.csv", "lexico_afinn.en.es.csv")
+```
+
+```{r}
+afinn <- read.csv("lexico_afinn.en.es.csv", stringsAsFactors = F, fileEncoding = "latin1") %>% 
+  tbl_df()
+```
+
+
+Conexión a twitter
+
+```{r}
+#https://apps.twitter.com/app/9399375/keys
+
+CK <- "fLtPlfGkekT7oFVTt7tNwtJAl"
+CS<- "9LtoLo7k9NEHmvEz4aCRU65UqLiVp0gZ3tH4kt6sfwUeJhXJp9"
+AT<- "454389339-fX5tBjCZ0OUO1acEN6jw8hfAq15cht8dKyJuJTWq"
+AS<- "CEcNkDSTMe0LAItjq04nQ73jQPBheofZcCU7Qae2MT6ba"
+
+setup_twitter_oauth(CK, CS, AT, AS)
+```
+
+```{r}
+n <- 50
+
+usuarios <-c("ClaudiaPavlovic", "lopezobrador_")
+
+df.tweet <- c()
+
+for (i in 1:length(usuarios)){
+  temp <- userTimeline(usuarios[i], n, maxID=NULL, sinceID=NULL, 
+                         includeRts=FALSE, excludeReplies=FALSE) %>% 
+  twListToDF()
+  df.tweet <- rbind(df.tweet, temp)
+}
+rm(temp)
+```
+
+Peparando los datos
+Fechas
+Lo primero que necesitamos es filtrar el objeto tuits para limitar nuestros datos sólo a los del 2018. Manipulamos la columna created_at con la función separate() de tidyr. Separamos esta columna en una fecha y hora del día, y después separaremos la fecha en día, mes y año. Usamos la función ymd() de lubridate para convertir la nueva columna Fecha a tipo de dato fecha.
+
+Por último, usamos filter() de dplyr para seleccionar sólo los tuits hechos en el 2018.
+
+```{r}
+df.tweet <- df.tweet %>%
+  separate(created, into = c("Fecha", "Hora"), sep = " ")
+df.tweet$Fecha %<>% ymd()
+#%>%
+#  separate(Fecha, into = c("Dia", "Mes", "Periodo"), sep = "/",
+#           remove = FALSE) %>%
+#  mutate(Fecha = dmy(Fecha),
+#         Semana = week(Fecha) %>% as.factor(),
+#         text = tolower(text))
+```
+
+Convirtiendo tuits en palabras
+Necesitamos separar cada tuit en palabras, para así asignarle a cada palabra relevante una puntuación de sentimiento usando el léxico Afinn. Usamos la función unnest_token() de tidytext, que tomara los tuits en la columna text y los separá en una nueva columna llamada Palabra Hecho esto, usamos left_join() de dplyr, para unir los objetos tuits y afinn, a partir del contenido de la columna Palabra. De este modo, obtendremos un data frame que contiene sólo los tuits con palabras presentes en el léxico Afinn.
+
+Además, aprovechamos para crear una columna con mutate() de dplyr a las palabras como Positiva o Negativa. Llamaremos esta columna Tipo y cambiamos el nombre de la columna screen_name a Candidato.
+
+```{r}
+df.afinn <- 
+  df.tweet %>%
+  unnest_tokens(input = "text", output = "Palabra") %>%
+  inner_join(afinn, ., by = "Palabra") %>%
+  mutate(Tipo = ifelse(Puntuacion > 0, "Positiva", "Negativa")) %>% 
+  rename("Candidato" = screenName)
+```
+
+Obtenemos también una puntuación por tuit, usando group_by() y summarise() de dplyr, y la agregamos tuits para usarla después. Tambien asignamos a los tuits sin puntuación positiva o negativa un valor de 0, que indica neutralidad. Por último cambiamos el nombre de la columna screen_name a Candidato
+
+```{r}
+df.tweet <-
+  df.afinn %>%
+  group_by(id) %>%
+  summarise(Puntuacion_tuit = mean(Puntuacion)) %>%
+  left_join(df.tweet, ., by = "id") %>% 
+  mutate(Puntuacion_tuit = ifelse(is.na(Puntuacion_tuit), 0, Puntuacion_tuit)) %>% 
+  rename("Candidato" = screenName)
+```
+
+```{r}
+# Total
+df.afinn %>%
+  count(Candidato)
+
+# Únicas
+df.afinn %>% 
+  group_by(Candidato) %>% 
+  distinct(Palabra) %>% 
+  count()
+
+map(c("Positiva", "Negativa"), function(sentimiento) {
+  df.afinn %>%
+    filter(Tipo ==  sentimiento) %>%
+    group_by(Candidato) %>%
+    count(Palabra, sort = T) %>%
+    top_n(n = 10, wt = n) %>%
+    ggplot() +
+    aes(Palabra, n, fill = Candidato) +
+    geom_col() +
+    facet_wrap("Candidato", scales = "free") +
+    scale_y_continuous(expand = c(0, 0)) +
+    coord_flip() +
+    labs(title = sentimiento) +
+    tema_graf
+})
+```
+```{r}
+df.afinn <-
+  df.afinn %>%
+  filter(Palabra != "no") 
+
+df.afinn.date <- df.afinn %>%
+                        group_by(id) %>%
+                        mutate(Suma = mean(Puntuacion)) %>%
+                        group_by(Candidato, Fecha) %>%
+                        summarise(Media = mean(Puntuacion))
+
+xts.afinn.date <- df.afinn %>%
+                        group_by(id) %>%
+                        group_by(Candidato, Fecha) %>%
+                        mutate(AMLO = ifelse(Candidato == "lopezobrador_"), mean(Puntuacion), NA) %>%
+                        group_by(Candidato, Fecha) %>%
+                        summarise(Media = mean(Puntuacion))
+
+
+df.afinn.date <- xts(df.afinn.date, order.by = df.afinn.date$Fecha)
+
+dygraph(df.afinn.date) %>%
+  dyOptions(fillGraph=TRUE, colors = "darkolivegreen", pointShape = "ex") %>%
+  dyRangeSelector()
+
+df.afinn.fecha %>%
+  ggplot() +
+  aes(Fecha, Media, color = Candidato) +
+  geom_line() +
+  theme(legend.position = "top")
+
+```
+
